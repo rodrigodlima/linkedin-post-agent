@@ -1,0 +1,75 @@
+name: Generate LinkedIn Post Drafts
+
+on:
+  schedule:
+    # Cron é sempre UTC. 11:00 UTC = 08:00 BRT, toda segunda-feira.
+    - cron: "0 11 * * 1"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Janela de dias para buscar repos com atividade"
+        required: false
+        default: "7"
+      repo:
+        description: "Analisar um repo específico (opcional, ex: distroless-java-poc)"
+        required: false
+        default: ""
+
+# Evita duas execuções concorrentes brigando entre si
+concurrency:
+  group: generate-posts
+  cancel-in-progress: false
+
+permissions:
+  contents: read   # checkout do próprio repo
+  issues: write    # criar a issue com os drafts
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # PAT fine-grained read-only (contents: read) nos seus repos de POC.
+          # Necessário se houver repos privados; para repos públicos o
+          # github.token padrão resolve, mas o PAT evita rate limit baixo.
+          GH_POC_TOKEN: ${{ secrets.GH_POC_TOKEN || github.token }}
+          GH_USER: ${{ github.repository_owner }}
+          DAYS_WINDOW: ${{ inputs.days || '7' }}
+          TARGET_REPO: ${{ inputs.repo || '' }}
+        run: python src/main.py
+
+      - name: Create review issue
+        if: hashFiles('drafts/latest.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="📝 Drafts LinkedIn — $(date +'%d/%m/%Y')"
+          gh issue create \
+            --title "$TITLE" \
+            --body-file drafts/latest.md \
+            --label "linkedin-draft"
+
+      - name: Upload drafts as artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drafts-${{ github.run_number }}
+          path: drafts/
+          retention-days: 30
+          if-no-files-found: ignore
