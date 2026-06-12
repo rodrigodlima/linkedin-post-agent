@@ -24,14 +24,14 @@ GH_TOKEN = os.environ["GH_POC_TOKEN"]
 GH_USER = os.environ["GH_USER"]
 DAYS_WINDOW = int(os.environ.get("DAYS_WINDOW", "7"))
 TARGET_REPO = os.environ.get("TARGET_REPO", "").strip()
-MODEL = os.environ.get("MODEL", "claude-sonnet-4-5")
+MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
 MAX_AGENT_TURNS = 15
 MAX_REPOS = 4  # 3-4 posts por semana
 
 PROMPTS = Path(__file__).parent.parent / "prompts"
 DRAFTS = Path(__file__).parent.parent / "drafts"
 
-client = anthropic.Anthropic()
+client = anthropic.Anthropic(max_retries=4)
 
 # ---------------------------------------------------------- github client ---
 
@@ -91,6 +91,9 @@ TOOLS = [
             "properties": {"repo": {"type": "string"}},
             "required": ["repo"],
         },
+        # Breakpoint de cache: as definições de tools são reenviadas a cada
+        # turn do loop (até MAX_AGENT_TURNS), então cacheá-las corta tokens.
+        "cache_control": {"type": "ephemeral"},
     },
 ]
 
@@ -99,16 +102,24 @@ def execute_tool(name: str, inp: dict) -> str:
     try:
         if name == "list_repo_tree":
             tree = gh(f"/repos/{GH_USER}/{inp['repo']}/git/trees/HEAD?recursive=1")
-            return "\n".join(i["path"] for i in tree["tree"][:200])
+            paths = "\n".join(i["path"] for i in tree["tree"][:200])
+            if tree.get("truncated"):
+                paths += "\n(árvore truncada pelo GitHub: nem todos os arquivos listados)"
+            return paths
         if name == "read_file":
             f = gh(f"/repos/{GH_USER}/{inp['repo']}/contents/{inp['path']}")
+            if isinstance(f, list):
+                # path é um diretório; devolve a listagem em vez de quebrar
+                return "Diretório, não arquivo. Conteúdo:\n" + "\n".join(
+                    i["path"] for i in f
+                )
             content = base64.b64decode(f["content"]).decode("utf-8", errors="replace")
             return content[:8000]
         if name == "get_recent_commits":
             commits = gh(f"/repos/{GH_USER}/{inp['repo']}/commits?per_page=10")
             return "\n".join(f"- {c['commit']['message'].splitlines()[0]}" for c in commits)
         return f"Tool desconhecida: {name}"
-    except requests.HTTPError as e:
+    except Exception as e:
         # Devolver o erro ao modelo permite que ele se recupere (ex.: path errado)
         return f"Erro ao executar {name}: {e}"
 
@@ -117,7 +128,15 @@ def execute_tool(name: str, inp: dict) -> str:
 
 def analyze_repo(repo_name: str) -> str:
     prompt = (PROMPTS / "analyze.md").read_text(encoding="utf-8")
-    messages = [{"role": "user", "content": prompt.format(repo=repo_name)}]
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": prompt.format(repo=repo_name),
+            # Prefixo estável durante o loop; cacheia a instrução base.
+            "cache_control": {"type": "ephemeral"},
+        }],
+    }]
 
     for _ in range(MAX_AGENT_TURNS):
         resp = client.messages.create(
@@ -127,7 +146,7 @@ def analyze_repo(repo_name: str) -> str:
             messages=messages,
         )
         if resp.stop_reason != "tool_use":
-            return next(b.text for b in resp.content if b.type == "text")
+            return next((b.text for b in resp.content if b.type == "text"), "")
 
         messages.append({"role": "assistant", "content": resp.content})
         results = [
@@ -156,12 +175,12 @@ def write_posts(repo_name: str, summary: str) -> str:
             "content": prompt.format(repo=repo_name, summary=summary),
         }],
     )
-    return resp.content[0].text
+    return next((b.text for b in resp.content if b.type == "text"), "")
 
 
 # ------------------------------------------------------------------- main ---
 
-def main():
+def main() -> int:
     if TARGET_REPO:
         repos = [{"name": TARGET_REPO}]
     else:
@@ -169,19 +188,19 @@ def main():
 
     if not repos:
         print(f"Nenhum repo com atividade nos últimos {DAYS_WINDOW} dias. Nada a fazer.")
-        return
+        return 0  # sem trabalho não é falha; o workflow checa drafts/latest.md
 
     print(f"Repos selecionados: {[r['name'] for r in repos]}")
 
     DRAFTS.mkdir(exist_ok=True)
     sections = []
-    cache = {}
+    summaries = {}
 
     for repo in repos:
         name = repo["name"]
         print(f"→ Analisando {name}...")
         summary = analyze_repo(name)
-        cache[name] = summary
+        summaries[name] = summary
 
         print(f"→ Gerando drafts para {name}...")
         posts = write_posts(name, summary)
@@ -197,10 +216,15 @@ def main():
     (DRAFTS / "latest.md").write_text(body, encoding="utf-8")
     (DRAFTS / f"{today}.md").write_text(body, encoding="utf-8")
     (DRAFTS / f"{today}-summaries.json").write_text(
-        json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"Drafts gravados em drafts/latest.md ({len(repos)} repos).")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print(f"Falha na execução: {e}", file=sys.stderr)
+        sys.exit(1)
