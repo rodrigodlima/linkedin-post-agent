@@ -2,27 +2,27 @@ name: Generate LinkedIn Post Drafts
 
 on:
   schedule:
-    # Cron é sempre UTC. 11:00 UTC = 08:00 BRT, toda segunda-feira.
+    # Cron is always UTC. 11:00 UTC = 08:00 BRT, every Monday.
     - cron: "0 11 * * 1"
   workflow_dispatch:
     inputs:
       days:
-        description: "Janela de dias para buscar repos com atividade"
+        description: "Day window to search for repos with activity"
         required: false
         default: "7"
       repo:
-        description: "Analisar um repo específico (opcional, ex: distroless-java-poc)"
+        description: "Analyze a specific repo (optional, e.g. distroless-java-poc)"
         required: false
         default: ""
 
-# Evita duas execuções concorrentes brigando entre si
+# Prevents two concurrent runs from fighting each other
 concurrency:
   group: generate-posts
   cancel-in-progress: false
 
 permissions:
-  contents: read   # checkout do próprio repo
-  issues: write    # criar a issue com os drafts
+  contents: read   # checkout of the repo itself
+  issues: write    # create the issue with the drafts
 
 jobs:
   generate:
@@ -45,9 +45,9 @@ jobs:
       - name: Run agent
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # PAT fine-grained read-only (contents: read) nos seus repos de POC.
-          # Necessário se houver repos privados; para repos públicos o
-          # github.token padrão resolve, mas o PAT evita rate limit baixo.
+          # Fine-grained read-only PAT (contents: read) on your POC repos.
+          # Needed if there are private repos; for public repos the default
+          # github.token works, but the PAT avoids the low rate limit.
           GH_POC_TOKEN: ${{ secrets.GH_POC_TOKEN || github.token }}
           GH_USER: ${{ github.repository_owner }}
           DAYS_WINDOW: ${{ inputs.days || '7' }}
@@ -59,7 +59,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TITLE="📝 Drafts LinkedIn — $(date +'%d/%m/%Y')"
+          TITLE="📝 LinkedIn Drafts — $(date +'%Y-%m-%d')"
           gh issue create \
             --title "$TITLE" \
             --body-file drafts/latest.md \
