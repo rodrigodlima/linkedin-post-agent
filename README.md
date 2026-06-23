@@ -27,7 +27,7 @@ weekly cron (GitHub Actions)
 
 ```bash
 export ANTHROPIC_API_KEY=...
-export GH_POC_TOKEN=...        # or any PAT with read access
+export GH_POC_TOKEN=...        # optional — only for private repos (unauthenticated = public only, 60 req/hr)
 export GH_USER=your-username
 export DAYS_WINDOW=7
 python src/main.py
