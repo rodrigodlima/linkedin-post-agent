@@ -1,42 +1,42 @@
 # linkedin-post-agent
 
-Agent que analisa POCs recentes no GitHub e gera drafts de posts para o LinkedIn,
-entregues como Issue para revisão humana (human-in-the-loop).
+Agent that analyzes recent POCs on GitHub and generates draft LinkedIn posts,
+delivered as an Issue for human review (human-in-the-loop).
 
-## Arquitetura
+## Architecture
 
 ```
-cron semanal (GitHub Actions)
+weekly cron (GitHub Actions)
   └─ src/main.py
-       1. Descobre repos com push recente        (código puro)
-       2. Agent explora cada repo via tools       (loop de tool use)
-       3. Gera 3 variações de post PT-BR + EN     (chamada simples)
-       4. Grava drafts/ e abre Issue de revisão   (gh CLI)
+       1. Discover repos with recent pushes        (plain code)
+       2. Agent explores each repo via tools        (tool-use loop)
+       3. Generate 3 post variations PT-BR + EN     (single call)
+       4. Write drafts/ and open a review Issue     (gh CLI)
 ```
 
 ## Setup
 
-1. Crie os secrets no repositório (Settings → Secrets and variables → Actions):
-   - `ANTHROPIC_API_KEY` — chave da API da Anthropic
-   - `GH_POC_TOKEN` — (opcional) PAT fine-grained com `contents: read`
-     nos repos de POC. Necessário apenas para repos privados.
-2. Crie a label `linkedin-draft` no repo (usada pela issue de revisão).
-3. Rode manualmente: Actions → Generate LinkedIn Post Drafts → Run workflow.
+1. Create the secrets in the repository (Settings → Secrets and variables → Actions):
+   - `ANTHROPIC_API_KEY` — Anthropic API key
+   - `GH_POC_TOKEN` — (optional) fine-grained PAT with `contents: read`
+     on the POC repos. Only needed for private repos.
+2. Create the `linkedin-draft` label in the repo (used by the review issue).
+3. Run manually: Actions → Generate LinkedIn Post Drafts → Run workflow.
 
-## Execução local
+## Local execution
 
 ```bash
 export ANTHROPIC_API_KEY=...
-export GH_POC_TOKEN=...        # ou um PAT qualquer com leitura
-export GH_USER=seu-usuario
+export GH_POC_TOKEN=...        # or any PAT with read access
+export GH_USER=your-username
 export DAYS_WINDOW=7
 python src/main.py
 ```
 
-Os drafts ficam em `drafts/latest.md`.
+Drafts are written to `drafts/latest.md`.
 
-## Custos
+## Costs
 
-~4 repos/semana × (~10 tool turns de análise + 1 chamada de redação).
-Ajuste `MAX_REPOS`, `MAX_AGENT_TURNS` e o truncamento de arquivos em
-`src/main.py` para controlar consumo de tokens.
+~4 repos/week × (~10 analysis tool turns + 1 writing call).
+Tune `MAX_REPOS`, `MAX_AGENT_TURNS`, and the file truncation in
+`src/main.py` to control token consumption.
