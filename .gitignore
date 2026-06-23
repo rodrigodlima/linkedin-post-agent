@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+
+# generated post drafts (keep the dir, ignore the output)
+drafts/*
+!drafts/.gitkeep
