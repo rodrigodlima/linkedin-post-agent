@@ -1,11 +1,11 @@
 """
-linkedin-post-agent — analisa POCs recentes no GitHub e gera drafts de posts.
+linkedin-post-agent — analyzes recent POCs on GitHub and generates post drafts.
 
 Pipeline:
-  1. Descobrir repos com push recente (código puro, sem LLM)
-  2. Para cada repo: agent explora via tools e produz resumo técnico
-  3. Gerar variações de post a partir do resumo
-  4. Gravar drafts/latest.md (o workflow cria a issue de revisão)
+  1. Discover repos with recent pushes (plain code, no LLM)
+  2. For each repo: the agent explores via tools and produces a technical summary
+  3. Generate post variations from the summary
+  4. Write drafts/latest.md (the workflow opens the review issue)
 """
 
 import base64
@@ -20,13 +20,13 @@ import requests
 
 # ---------------------------------------------------------------- config ---
 
-GH_TOKEN = os.environ["GH_POC_TOKEN"]
+GH_TOKEN = os.environ.get("GH_POC_TOKEN", "").strip()  # optional: only needed for private repos
 GH_USER = os.environ["GH_USER"]
 DAYS_WINDOW = int(os.environ.get("DAYS_WINDOW", "7"))
 TARGET_REPO = os.environ.get("TARGET_REPO", "").strip()
-MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
+MODEL = os.environ.get("MODEL", "claude-haiku-4-5-20251001")
 MAX_AGENT_TURNS = 15
-MAX_REPOS = 4  # 3-4 posts por semana
+MAX_REPOS = 4  # 3-4 posts per week
 
 PROMPTS = Path(__file__).parent.parent / "prompts"
 DRAFTS = Path(__file__).parent.parent / "drafts"
@@ -36,10 +36,9 @@ client = anthropic.Anthropic(max_retries=4)
 # ---------------------------------------------------------- github client ---
 
 session = requests.Session()
-session.headers.update({
-    "Authorization": f"Bearer {GH_TOKEN}",
-    "Accept": "application/vnd.github+json",
-})
+session.headers.update({"Accept": "application/vnd.github+json"})
+if GH_TOKEN:
+    session.headers["Authorization"] = f"Bearer {GH_TOKEN}"
 
 
 def gh(path: str):
@@ -64,7 +63,7 @@ def recent_repos(days: int) -> list[dict]:
 TOOLS = [
     {
         "name": "list_repo_tree",
-        "description": "Lista os caminhos de arquivos do repositório (até 200 itens).",
+        "description": "Lists the repository file paths (up to 200 items).",
         "input_schema": {
             "type": "object",
             "properties": {"repo": {"type": "string"}},
@@ -73,7 +72,7 @@ TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Lê o conteúdo de um arquivo do repositório (truncado em 8000 chars).",
+        "description": "Reads the content of a repository file (truncated at 8000 chars).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -85,14 +84,14 @@ TOOLS = [
     },
     {
         "name": "get_recent_commits",
-        "description": "Retorna as 10 mensagens de commit mais recentes do repositório.",
+        "description": "Returns the 10 most recent commit messages of the repository.",
         "input_schema": {
             "type": "object",
             "properties": {"repo": {"type": "string"}},
             "required": ["repo"],
         },
-        # Breakpoint de cache: as definições de tools são reenviadas a cada
-        # turn do loop (até MAX_AGENT_TURNS), então cacheá-las corta tokens.
+        # Cache breakpoint: tool definitions are resent on every loop turn
+        # (up to MAX_AGENT_TURNS), so caching them cuts tokens.
         "cache_control": {"type": "ephemeral"},
     },
 ]
@@ -104,13 +103,13 @@ def execute_tool(name: str, inp: dict) -> str:
             tree = gh(f"/repos/{GH_USER}/{inp['repo']}/git/trees/HEAD?recursive=1")
             paths = "\n".join(i["path"] for i in tree["tree"][:200])
             if tree.get("truncated"):
-                paths += "\n(árvore truncada pelo GitHub: nem todos os arquivos listados)"
+                paths += "\n(tree truncated by GitHub: not all files listed)"
             return paths
         if name == "read_file":
             f = gh(f"/repos/{GH_USER}/{inp['repo']}/contents/{inp['path']}")
             if isinstance(f, list):
-                # path é um diretório; devolve a listagem em vez de quebrar
-                return "Diretório, não arquivo. Conteúdo:\n" + "\n".join(
+                # path is a directory; return the listing instead of breaking
+                return "Directory, not a file. Contents:\n" + "\n".join(
                     i["path"] for i in f
                 )
             content = base64.b64decode(f["content"]).decode("utf-8", errors="replace")
@@ -118,13 +117,13 @@ def execute_tool(name: str, inp: dict) -> str:
         if name == "get_recent_commits":
             commits = gh(f"/repos/{GH_USER}/{inp['repo']}/commits?per_page=10")
             return "\n".join(f"- {c['commit']['message'].splitlines()[0]}" for c in commits)
-        return f"Tool desconhecida: {name}"
+        return f"Unknown tool: {name}"
     except Exception as e:
-        # Devolver o erro ao modelo permite que ele se recupere (ex.: path errado)
-        return f"Erro ao executar {name}: {e}"
+        # Returning the error to the model lets it recover (e.g. wrong path)
+        return f"Error executing {name}: {e}"
 
 
-# -------------------------------------------------------- etapa 2: análise ---
+# --------------------------------------------------------- step 2: analysis ---
 
 def analyze_repo(repo_name: str) -> str:
     prompt = (PROMPTS / "analyze.md").read_text(encoding="utf-8")
@@ -133,7 +132,7 @@ def analyze_repo(repo_name: str) -> str:
         "content": [{
             "type": "text",
             "text": prompt.format(repo=repo_name),
-            # Prefixo estável durante o loop; cacheia a instrução base.
+            # Stable prefix during the loop; caches the base instruction.
             "cache_control": {"type": "ephemeral"},
         }],
     }]
@@ -160,10 +159,10 @@ def analyze_repo(repo_name: str) -> str:
         ]
         messages.append({"role": "user", "content": results})
 
-    return "(análise interrompida: limite de iterações atingido)"
+    return "(analysis interrupted: iteration limit reached)"
 
 
-# -------------------------------------------------------- etapa 3: redação ---
+# ---------------------------------------------------------- step 3: writing ---
 
 def write_posts(repo_name: str, summary: str) -> str:
     prompt = (PROMPTS / "write_post.md").read_text(encoding="utf-8")
@@ -172,7 +171,7 @@ def write_posts(repo_name: str, summary: str) -> str:
         max_tokens=4000,
         messages=[{
             "role": "user",
-            "content": prompt.format(repo=repo_name, summary=summary),
+            "content": prompt.format(repo=repo_name, summary=summary, gh_user=GH_USER),
         }],
     )
     return next((b.text for b in resp.content if b.type == "text"), "")
@@ -187,10 +186,10 @@ def main() -> int:
         repos = recent_repos(DAYS_WINDOW)
 
     if not repos:
-        print(f"Nenhum repo com atividade nos últimos {DAYS_WINDOW} dias. Nada a fazer.")
-        return 0  # sem trabalho não é falha; o workflow checa drafts/latest.md
+        print(f"No repos with activity in the last {DAYS_WINDOW} days. Nothing to do.")
+        return 0  # no work is not a failure; the workflow checks drafts/latest.md
 
-    print(f"Repos selecionados: {[r['name'] for r in repos]}")
+    print(f"Selected repos: {[r['name'] for r in repos]}")
 
     DRAFTS.mkdir(exist_ok=True)
     sections = []
@@ -198,18 +197,18 @@ def main() -> int:
 
     for repo in repos:
         name = repo["name"]
-        print(f"→ Analisando {name}...")
+        print(f"→ Analyzing {name}...")
         summary = analyze_repo(name)
         summaries[name] = summary
 
-        print(f"→ Gerando drafts para {name}...")
+        print(f"→ Generating drafts for {name}...")
         posts = write_posts(name, summary)
         sections.append(f"## 📦 {name}\n\n{posts}\n\n---\n")
 
     today = datetime.now().strftime("%Y-%m-%d")
     body = (
-        f"Drafts gerados em {today} (janela: {DAYS_WINDOW} dias).\n\n"
-        "Revise, edite e poste manualmente. Feche a issue quando terminar.\n\n---\n\n"
+        f"Drafts generated on {today} (window: {DAYS_WINDOW} days).\n\n"
+        "Review, edit and post manually. Close the issue when done.\n\n---\n\n"
         + "\n".join(sections)
     )
 
@@ -218,7 +217,7 @@ def main() -> int:
     (DRAFTS / f"{today}-summaries.json").write_text(
         json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print(f"Drafts gravados em drafts/latest.md ({len(repos)} repos).")
+    print(f"Drafts written to drafts/latest.md ({len(repos)} repos).")
     return 0
 
 
@@ -226,5 +225,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        print(f"Falha na execução: {e}", file=sys.stderr)
+        print(f"Execution failed: {e}", file=sys.stderr)
         sys.exit(1)
