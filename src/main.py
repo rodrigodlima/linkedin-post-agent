@@ -3,9 +3,10 @@ linkedin-post-agent — analyzes recent POCs on GitHub and generates post drafts
 
 Pipeline:
   1. Discover repos with recent pushes (plain code, no LLM)
-  2. For each repo: the agent explores via tools and produces a technical summary
-  3. Generate post variations from the summary
-  4. Write drafts/latest.md (the workflow opens the review issue)
+  2. Derive the topic folders changed in the window from recent commits
+  3. For each topic: the agent explores only that subtree and summarizes it
+  4. Generate post variations from the summary
+  5. Write drafts/latest.md (the workflow opens the review issue)
 """
 
 import base64
@@ -25,13 +26,42 @@ GH_USER = os.environ["GH_USER"]
 DAYS_WINDOW = int(os.environ.get("DAYS_WINDOW", "7"))
 TARGET_REPO = os.environ.get("TARGET_REPO", "").strip()
 MODEL = os.environ.get("MODEL", "claude-haiku-4-5-20251001")
-MAX_AGENT_TURNS = 15
-MAX_REPOS = 4  # 3-4 posts per week
+MAX_AGENT_TURNS = 8
+MAX_POSTS = 2  # 1-2 posts per week (cost-capped); one post per changed topic folder
+MAX_COMMITS = 30  # cap per-commit detail fetches when deriving changed topics
 
 PROMPTS = Path(__file__).parent.parent / "prompts"
 DRAFTS = Path(__file__).parent.parent / "drafts"
 
 client = anthropic.Anthropic(max_retries=4)
+
+# ----------------------------------------------------------- cost tracking ---
+# Prices per token. Default = Haiku 4.5 ($1/$5 per 1M in/out). Override via env
+# to match the active MODEL (e.g. Sonnet 4.6 = 3/15). Cache read ~0.1x input,
+# cache write ~1.25x input.
+PRICE_IN = float(os.environ.get("PRICE_IN", "1.00")) / 1e6
+PRICE_OUT = float(os.environ.get("PRICE_OUT", "5.00")) / 1e6
+PRICE_CACHE_W = PRICE_IN * 1.25
+PRICE_CACHE_R = PRICE_IN * 0.10
+
+USAGE = {"input": 0, "output": 0, "cache_w": 0, "cache_r": 0}
+
+
+def record(usage) -> None:
+    USAGE["input"] += usage.input_tokens
+    USAGE["output"] += usage.output_tokens
+    USAGE["cache_w"] += usage.cache_creation_input_tokens or 0
+    USAGE["cache_r"] += usage.cache_read_input_tokens or 0
+
+
+def usd() -> float:
+    return (
+        USAGE["input"] * PRICE_IN
+        + USAGE["output"] * PRICE_OUT
+        + USAGE["cache_w"] * PRICE_CACHE_W
+        + USAGE["cache_r"] * PRICE_CACHE_R
+    )
+
 
 # ---------------------------------------------------------- github client ---
 
@@ -55,7 +85,29 @@ def recent_repos(days: int) -> list[dict]:
         pushed = datetime.fromisoformat(repo["pushed_at"].replace("Z", "+00:00"))
         if pushed >= cutoff and not repo["fork"]:
             out.append(repo)
-    return out[:MAX_REPOS]
+    return out  # capped later, on the per-topic unit list
+
+
+def topic_of(path: str) -> str:
+    """Topic = first 2 directory segments of a changed file path.
+    e.g. kubernetes/knative/service.yaml -> 'kubernetes/knative',
+         terraform/main.tf               -> 'terraform',
+         README.md                       -> '' (the whole repo)."""
+    return "/".join(path.split("/")[:-1][:2])
+
+
+def recent_topics(repo: str, days: int) -> list[str]:
+    """Topic folders touched by commits in the window, newest first, deduped."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    commits = gh(f"/repos/{GH_USER}/{repo}/commits?since={cutoff}&per_page=100")
+    topics: list[str] = []
+    for c in commits[:MAX_COMMITS]:
+        detail = gh(f"/repos/{GH_USER}/{repo}/commits/{c['sha']}")
+        for f in detail.get("files", []):
+            t = topic_of(f["filename"])
+            if t not in topics:
+                topics.append(t)
+    return topics
 
 
 # ------------------------------------------------------------ agent tools ---
@@ -72,7 +124,7 @@ TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Reads the content of a repository file (truncated at 8000 chars).",
+        "description": "Reads the content of a repository file (truncated at 4000 chars).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -97,14 +149,18 @@ TOOLS = [
 ]
 
 
-def execute_tool(name: str, inp: dict) -> str:
+def execute_tool(name: str, inp: dict, topic: str = "") -> str:
     try:
         if name == "list_repo_tree":
             tree = gh(f"/repos/{GH_USER}/{inp['repo']}/git/trees/HEAD?recursive=1")
-            paths = "\n".join(i["path"] for i in tree["tree"][:200])
+            paths = [i["path"] for i in tree["tree"]]
+            if topic:  # scope the listing to the changed topic folder
+                prefix = topic + "/"
+                paths = [p for p in paths if p.startswith(prefix)]
+            out = "\n".join(paths[:200])
             if tree.get("truncated"):
-                paths += "\n(tree truncated by GitHub: not all files listed)"
-            return paths
+                out += "\n(tree truncated by GitHub: not all files listed)"
+            return out or "(no files under this topic)"
         if name == "read_file":
             f = gh(f"/repos/{GH_USER}/{inp['repo']}/contents/{inp['path']}")
             if isinstance(f, list):
@@ -113,7 +169,7 @@ def execute_tool(name: str, inp: dict) -> str:
                     i["path"] for i in f
                 )
             content = base64.b64decode(f["content"]).decode("utf-8", errors="replace")
-            return content[:8000]
+            return content[:4000]
         if name == "get_recent_commits":
             commits = gh(f"/repos/{GH_USER}/{inp['repo']}/commits?per_page=10")
             return "\n".join(f"- {c['commit']['message'].splitlines()[0]}" for c in commits)
@@ -125,13 +181,14 @@ def execute_tool(name: str, inp: dict) -> str:
 
 # --------------------------------------------------------- step 2: analysis ---
 
-def analyze_repo(repo_name: str) -> str:
+def analyze_topic(repo_name: str, topic: str) -> str:
     prompt = (PROMPTS / "analyze.md").read_text(encoding="utf-8")
+    topic_label = topic or "(the repository root — analyze the whole repo)"
     messages = [{
         "role": "user",
         "content": [{
             "type": "text",
-            "text": prompt.format(repo=repo_name),
+            "text": prompt.format(repo=repo_name, topic=topic_label),
             # Stable prefix during the loop; caches the base instruction.
             "cache_control": {"type": "ephemeral"},
         }],
@@ -144,6 +201,7 @@ def analyze_repo(repo_name: str) -> str:
             tools=TOOLS,
             messages=messages,
         )
+        record(resp.usage)
         if resp.stop_reason != "tool_use":
             return next((b.text for b in resp.content if b.type == "text"), "")
 
@@ -152,7 +210,7 @@ def analyze_repo(repo_name: str) -> str:
             {
                 "type": "tool_result",
                 "tool_use_id": b.id,
-                "content": execute_tool(b.name, b.input),
+                "content": execute_tool(b.name, b.input, topic),
             }
             for b in resp.content
             if b.type == "tool_use"
@@ -164,16 +222,23 @@ def analyze_repo(repo_name: str) -> str:
 
 # ---------------------------------------------------------- step 3: writing ---
 
-def write_posts(repo_name: str, summary: str) -> str:
+def write_posts(repo_name: str, branch: str, topic: str, summary: str) -> str:
     prompt = (PROMPTS / "write_post.md").read_text(encoding="utf-8")
+    if topic:
+        subject = f"{repo_name}/{topic}"
+        repo_url = f"github.com/{GH_USER}/{repo_name}/tree/{branch}/{topic}"
+    else:
+        subject = repo_name
+        repo_url = f"github.com/{GH_USER}/{repo_name}"
     resp = client.messages.create(
         model=MODEL,
         max_tokens=4000,
         messages=[{
             "role": "user",
-            "content": prompt.format(repo=repo_name, summary=summary, gh_user=GH_USER),
+            "content": prompt.format(repo=subject, summary=summary, repo_url=repo_url),
         }],
     )
+    record(resp.usage)
     return next((b.text for b in resp.content if b.type == "text"), "")
 
 
@@ -181,7 +246,7 @@ def write_posts(repo_name: str, summary: str) -> str:
 
 def main() -> int:
     if TARGET_REPO:
-        repos = [{"name": TARGET_REPO}]
+        repos = [gh(f"/repos/{GH_USER}/{TARGET_REPO}")]
     else:
         repos = recent_repos(DAYS_WINDOW)
 
@@ -189,21 +254,40 @@ def main() -> int:
         print(f"No repos with activity in the last {DAYS_WINDOW} days. Nothing to do.")
         return 0  # no work is not a failure; the workflow checks drafts/latest.md
 
-    print(f"Selected repos: {[r['name'] for r in repos]}")
+    # One unit = one (repo, branch, topic-folder) changed in the window. Newest
+    # repos first; cap the total number of posts.
+    units = []
+    for repo in repos:
+        name = repo["name"]
+        branch = repo.get("default_branch", "main")
+        for topic in recent_topics(name, DAYS_WINDOW):
+            units.append((name, branch, topic))
+            if len(units) >= MAX_POSTS:
+                break
+        if len(units) >= MAX_POSTS:
+            break
+
+    if not units:
+        print(f"No file changes in the last {DAYS_WINDOW} days. Nothing to do.")
+        return 0
+
+    print(f"Selected topics: {[f'{n}/{t}' if t else n for n, _, t in units]}")
 
     DRAFTS.mkdir(exist_ok=True)
     sections = []
     summaries = {}
 
-    for repo in repos:
-        name = repo["name"]
-        print(f"→ Analyzing {name}...")
-        summary = analyze_repo(name)
-        summaries[name] = summary
+    for name, branch, topic in units:
+        before = usd()
+        label = f"{name}/{topic}" if topic else name
+        print(f"→ Analyzing {label}...")
+        summary = analyze_topic(name, topic)
+        summaries[label] = summary
 
-        print(f"→ Generating drafts for {name}...")
-        posts = write_posts(name, summary)
-        sections.append(f"## 📦 {name}\n\n{posts}\n\n---\n")
+        print(f"→ Generating drafts for {label}...")
+        posts = write_posts(name, branch, topic, summary)
+        sections.append(f"## 📦 {label}\n\n{posts}\n\n---\n")
+        print(f"  {label}: ${usd() - before:.4f}")
 
     today = datetime.now().strftime("%Y-%m-%d")
     body = (
@@ -217,7 +301,12 @@ def main() -> int:
     (DRAFTS / f"{today}-summaries.json").write_text(
         json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print(f"Drafts written to drafts/latest.md ({len(repos)} repos).")
+    print(f"Drafts written to drafts/latest.md ({len(units)} posts).")
+    print(
+        f"Tokens — in: {USAGE['input']:,} out: {USAGE['output']:,} "
+        f"cache_w: {USAGE['cache_w']:,} cache_r: {USAGE['cache_r']:,}"
+    )
+    print(f"Estimated cost ({MODEL}): ${usd():.4f}")
     return 0
 
 
