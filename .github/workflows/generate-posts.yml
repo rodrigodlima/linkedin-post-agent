@@ -1,9 +1,10 @@
 name: Generate LinkedIn Post Drafts
 
 on:
-  schedule:
-    # Cron is always UTC. 11:00 UTC = 08:00 BRT, every Monday.
-    - cron: "0 11 * * 1"
+  # Scheduled runs disabled — high API token cost. Run manually instead.
+  # schedule:
+  #   # Cron is always UTC. 11:00 UTC = 08:00 BRT, every Monday.
+  #   - cron: "0 11 * * 1"
   workflow_dispatch:
     inputs:
       days:
