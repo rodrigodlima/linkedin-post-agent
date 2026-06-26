@@ -8,11 +8,17 @@ delivered as an Issue for human review (human-in-the-loop).
 ```
 weekly cron (GitHub Actions)
   └─ src/main.py
-       1. Discover repos with recent pushes        (plain code)
-       2. Agent explores each repo via tools        (tool-use loop)
-       3. Generate 3 post variations PT-BR + EN     (single call)
-       4. Write drafts/ and open a review Issue     (gh CLI)
+       1. Discover repos with recent pushes         (plain code)
+       2. Derive changed topic folders from commits  (plain code)
+       3. Agent explores each topic subtree          (tool-use loop)
+       4. Generate 3 post variations PT-BR + EN      (single call)
+       5. Write drafts/ and open a review Issue      (gh CLI)
 ```
+
+A "topic" is the first two path segments of a changed file
+(`kubernetes/knative/service.yaml` → `kubernetes/knative`), so one monorepo
+yields one post per changed area, not one giant post for the whole repo.
+Root-level changes map to the repo itself.
 
 ## Setup
 
@@ -37,6 +43,7 @@ Drafts are written to `drafts/latest.md`.
 
 ## Costs
 
-~4 repos/week × (~10 analysis tool turns + 1 writing call).
-Tune `MAX_REPOS`, `MAX_AGENT_TURNS`, and the file truncation in
-`src/main.py` to control token consumption.
+~`MAX_POSTS` topics/week × (~`MAX_AGENT_TURNS` analysis tool turns + 1 writing call).
+Tune `MAX_POSTS`, `MAX_AGENT_TURNS`, `MAX_COMMITS`, and the file truncation in
+`src/main.py` to control token consumption. Each run prints actual token usage
+and an estimated USD cost; set `PRICE_IN`/`PRICE_OUT` to match the active `MODEL`.
