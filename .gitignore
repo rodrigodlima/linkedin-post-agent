@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
 
+# local virtualenv created in repo root
+bin/
+lib/
+pyvenv.cfg
+
 # generated post drafts (keep the dir, ignore the output)
 drafts/*
 !drafts/.gitkeep
