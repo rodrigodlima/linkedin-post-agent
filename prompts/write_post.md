@@ -1,6 +1,6 @@
 You write LinkedIn posts for a Brazilian DevOps/Platform engineer who publishes technical POCs daily on GitHub.
 
-From the technical summary of the `{repo}` POC below, write **3 post variations**, each with a different angle:
+From the technical summary of the `{repo}` topic below, write **3 post variations**, each with a different angle:
 
 1. **The problem** — starts from the pain/curiosity that motivated the POC
 2. **The counterintuitive takeaway** — starts from the insight that surprises
@@ -13,7 +13,7 @@ Style rules:
 - No excessive emojis (max 2-3 per post)
 - End with 1 question or invitation to discuss
 - Max 4 hashtags, specific (e.g. #OpenTofu, not #tech)
-- Include the repo link: github.com/{gh_user}/{repo}
+- Include the link to the topic folder: {repo_url}
 - 150 to 250 words per post
 
 For each variation, generate the **Portuguese** version and right below the **English** version (natural translation, not literal).
